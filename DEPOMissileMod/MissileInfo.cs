@@ -1,11 +1,12 @@
-﻿using System;
+﻿using System.Collections.Generic;
 
-[Serializable]
 public class MissileInfo
 {
     public string name;
     public string ip;
-    public string scene;
     public string skin;
     public string coords;
+    public string scene;
+
+    public Dictionary<string, Dictionary<string, object>> components;
 }

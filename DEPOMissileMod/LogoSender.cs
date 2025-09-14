@@ -85,17 +85,16 @@ public class LogoSender : MonoBehaviour
 
         if (jpgData.Length > 60000)
         {
-            MissileModPlugin.LogWarning($"JPG too large for UDP: {jpgData.Length} bytes");
+            MissileModPlugin.LogWarning($"DP Logo too large for UDP: {jpgData.Length} bytes");
         }
 
         try
         {
             udpClient.Send(jpgData, jpgData.Length, remoteEP);
-            MissileModPlugin.LogInfo($"JPG logo sent ({jpgData.Length} bytes) to {remoteEP}");
         }
         catch (System.Exception ex)
         {
-            MissileModPlugin.LogError("Error sending JPG: " + ex.Message);
+            MissileModPlugin.LogError("Error sending DP Logo: " + ex.Message);
         }
     }
 

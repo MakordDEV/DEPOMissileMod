@@ -6,16 +6,17 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
 
-[BepInPlugin("ru.makorddev.depomissilemod", "DEPO missile mod", "1.0.0")]
+[BepInPlugin("ru.makorddev.depomissilemod", "DEPO missile mod", "1.0")]
 public class MissileModPlugin : BaseUnityPlugin
 {
     private UdpClient udpClient;
@@ -30,7 +31,7 @@ public class MissileModPlugin : BaseUnityPlugin
 
     private ConcurrentQueue<string> receivedMessages = new ConcurrentQueue<string>();
 
-    private void Awake()
+    public void Awake()
     {
         udpClient = new UdpClient(0);
         remoteEP = new IPEndPoint(Dns.GetHostAddresses("busiatep.ru")[0], 9999);
@@ -46,6 +47,13 @@ public class MissileModPlugin : BaseUnityPlugin
 
         Logger.LogInfo($"DEPO missile mod initialized.");
     }
+
+    public void Start()
+    {
+        StartCoroutine(SayHello());
+        RunSendGetCordLoop();
+    }
+
     private void OnApplicationQuit()
     {
         SendUdpMessage("bye");
@@ -55,13 +63,6 @@ public class MissileModPlugin : BaseUnityPlugin
     {
         udpClient?.Close();
     }
-
-    private void Start()
-    {
-        StartCoroutine(SayHello());
-        RunSendGetCordLoop();
-    }
-
     IEnumerator SayHello()
     {
         bool ready = false;
@@ -77,7 +78,7 @@ public class MissileModPlugin : BaseUnityPlugin
             }
             catch (Exception)
             {
-                // steam not ready
+                // steam isnt ready 
             }
 
             if (!ready) yield return new WaitForSeconds(5f);
@@ -95,12 +96,20 @@ public class MissileModPlugin : BaseUnityPlugin
 
     private async void RunSendGetCordLoop()
     {
-        while (true)
+        try
         {
-            await SendGetCordAsync();
-            await Task.Delay(50);
+            while (true)
+            {
+                await SendGetCordAsync();
+                await Task.Delay(50);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError("[RunSendGetCordLoop] Exception: " + ex);
         }
     }
+
 
     private async Task SendGetCordAsync()
     {
@@ -127,7 +136,17 @@ public class MissileModPlugin : BaseUnityPlugin
                 if (string.IsNullOrEmpty(json))
                     return;
 
-                List<MissileInfo> missiles = JsonConvert.DeserializeObject<List<MissileInfo>>(json);
+                List<MissileInfo> missiles;
+                try
+                {
+                    missiles = JsonConvert.DeserializeObject<List<MissileInfo>>(json);
+                }
+                catch (Exception ex)
+                {
+                    LogError("[SendGetCord] JSON parse error: " + ex.Message);
+                    return;
+                }
+
                 HashSet<string> receivedKeys = new HashSet<string>();
 
                 foreach (var missile in missiles)
@@ -144,7 +163,13 @@ public class MissileModPlugin : BaseUnityPlugin
                     }
                     else
                     {
-                        MissileManager.SpawnMissile(missile.name, missile.coords, missile.skin, missile.ip);
+                        MissileManager.SpawnMissile(
+                            missile.name,
+                            missile.coords,
+                            missile.skin,
+                            missile.ip,
+                            missile.components 
+                        );
                     }
                 }
 
@@ -166,7 +191,7 @@ public class MissileModPlugin : BaseUnityPlugin
         }
         catch (Exception e)
         {
-            LogError($"[SendGetCord] Exception: {e.Message}");
+            LogError($"[SendGetCord] Exception: {e}");
         }
     }
 
@@ -189,19 +214,76 @@ public class MissileModPlugin : BaseUnityPlugin
     public static void LogWarning(string message) => Instance.Logger.LogWarning(message);
 }
 
+// temp turned off
+//[HarmonyPatch(typeof(CambiarLogoDP))]
+//[HarmonyPatch("Start")]
+//public class CambiarLogoDPPatch
+//{
+//    static void Postfix(CambiarLogoDP __instance)
+//    {
+//        if (__instance.gameObject.GetComponent<LogoSender>() == null)
+//        {
+//            __instance.gameObject.AddComponent<LogoSender>();
+//        }
+//    }
+//}
 
-[HarmonyPatch(typeof(CambiarLogoDP))]
-[HarmonyPatch("Start")]
-public class CambiarLogoDPPatch
+public static class MissileInspector
 {
-    static void Postfix(CambiarLogoDP __instance)
+    public static string SerializeMissileToJson(GameObject go)
     {
-        if (__instance.gameObject.GetComponent<LogoSender>() == null)
+        var result = new Dictionary<string, object>();
+
+        result["name"] = go.name;
+        result["position"] = go.transform.position;
+        result["rotation"] = go.transform.rotation;
+        result["scale"] = go.transform.localScale;
+
+        var componentData = new List<Dictionary<string, object>>();
+
+        foreach (var comp in go.GetComponents<Component>())
         {
-            __instance.gameObject.AddComponent<LogoSender>();
+            if (comp == null) continue;
+
+            var compInfo = new Dictionary<string, object>();
+            Type type = comp.GetType();
+            compInfo["type"] = type.FullName;
+
+            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                try
+                {
+                    var value = field.GetValue(comp);
+                    compInfo[field.Name] = value;
+                }
+                catch { }
+            }
+
+            foreach (var prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (!prop.CanRead || prop.GetIndexParameters().Length > 0) continue;
+                try
+                {
+                    var value = prop.GetValue(comp, null);
+                    compInfo[prop.Name] = value;
+                }
+                catch { }
+            }
+
+            componentData.Add(compInfo);
         }
+
+        result["components"] = componentData;
+
+        return JsonConvert.SerializeObject(result, Formatting.None,
+            new JsonSerializerSettings
+            {
+                ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+                NullValueHandling = NullValueHandling.Ignore
+            });
     }
 }
+
 
 [HarmonyPatch(typeof(Missile))]
 public class MissilePatches
@@ -209,22 +291,21 @@ public class MissilePatches
     private static HashSet<Missile> launchedMissiles = new HashSet<Missile>();
     private static MissileLauncher launcher;
 
+    private static GameObject[] cachedMissilePrefabs;
+
     [HarmonyPostfix]
     [HarmonyPatch("FixedUpdate")]
     public static void Postfix_FixedUpdate(Missile __instance)
     {
         try
         {
-            var missileStateField = __instance.GetType().GetProperty("MyMissileState");
-            if (missileStateField == null) return;
-
             var state = __instance.MyMissileState;
             if (state == MissileStates.Moving)
             {
                 Vector3 pos = __instance.transform.position;
                 Quaternion rot = __instance.transform.rotation;
                 string coords = FormatPositionAndRotation(pos, rot);
-                string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                string scene = SceneManager.GetActiveScene().name;
 
                 if (launcher == null)
                 {
@@ -236,7 +317,6 @@ public class MissilePatches
                     launchedMissiles.Add(__instance);
 
                     string playerId = SteamUser.GetSteamID().m_SteamID.ToString();
-
                     string skin = "unknown";
                     try
                     {
@@ -251,6 +331,12 @@ public class MissilePatches
 
                     string msgLaunch = $"launch_missile;{playerId};{scene};{coords};{skin}";
                     MissileModPlugin.SendUdpMessage(msgLaunch);
+
+                    string jsonPrefab = MissileInspector.SerializeMissileToJson(__instance.gameObject);
+
+                    string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(jsonPrefab));
+
+                    MissileModPlugin.SendUdpMessage($"missile_prefab_data;{playerId};{scene};{encoded}");
                 }
                 else
                 {
@@ -281,7 +367,7 @@ public class MissilePatches
             Vector3 pos = __instance.transform.position;
             Quaternion rot = __instance.transform.rotation;
             string coords = FormatPositionAndRotation(pos, rot);
-            string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            string scene = SceneManager.GetActiveScene().name;
             string msg = $"explode_missile;{scene};{coords}";
             MissileModPlugin.SendUdpMessage(msg);
 
