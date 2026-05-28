@@ -63,6 +63,7 @@ public class MissileModPlugin : BaseUnityPlugin
     {
         udpClient?.Close();
     }
+
     IEnumerator SayHello()
     {
         bool ready = false;
@@ -78,7 +79,6 @@ public class MissileModPlugin : BaseUnityPlugin
             }
             catch (Exception)
             {
-                // steam isnt ready 
             }
 
             if (!ready) yield return new WaitForSeconds(5f);
@@ -109,7 +109,6 @@ public class MissileModPlugin : BaseUnityPlugin
             LogError("[RunSendGetCordLoop] Exception: " + ex);
         }
     }
-
 
     private async Task SendGetCordAsync()
     {
@@ -214,84 +213,38 @@ public class MissileModPlugin : BaseUnityPlugin
     public static void LogWarning(string message) => Instance.Logger.LogWarning(message);
 }
 
-// temp turned off
-//[HarmonyPatch(typeof(CambiarLogoDP))]
-//[HarmonyPatch("Start")]
-//public class CambiarLogoDPPatch
-//{
-//    static void Postfix(CambiarLogoDP __instance)
-//    {
-//        if (__instance.gameObject.GetComponent<LogoSender>() == null)
-//        {
-//            __instance.gameObject.AddComponent<LogoSender>();
-//        }
-//    }
-//}
-
-public static class MissileInspector
+[HarmonyPatch(typeof(MissileLauncher), "Start")]
+public class MissileLauncher_Start_Patch
 {
-    public static string SerializeMissileToJson(GameObject go)
+    public static void Postfix(MissileLauncher __instance)
     {
-        var result = new Dictionary<string, object>();
-
-        result["name"] = go.name;
-        result["position"] = go.transform.position;
-        result["rotation"] = go.transform.rotation;
-        result["scale"] = go.transform.localScale;
-
-        var componentData = new List<Dictionary<string, object>>();
-
-        foreach (var comp in go.GetComponents<Component>())
+        if (MissileManager.MasterPrefab == null)
         {
-            if (comp == null) continue;
-
-            var compInfo = new Dictionary<string, object>();
-            Type type = comp.GetType();
-            compInfo["type"] = type.FullName;
-
-            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            try
             {
-                try
+                FieldInfo field = typeof(MissileLauncher).GetField("PrefabMissile", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field != null)
                 {
-                    var value = field.GetValue(comp);
-                    compInfo[field.Name] = value;
+                    GameObject prefab = field.GetValue(__instance) as GameObject;
+                    if (prefab != null)
+                    {
+                        MissileManager.InitializeNetworkPrefab(prefab);
+                        MissileModPlugin.LogInfo("MasterPrefab successfully extracted from MissileLauncher.Start");
+                    }
                 }
-                catch { }
             }
-
-            foreach (var prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            catch (Exception ex)
             {
-                if (!prop.CanRead || prop.GetIndexParameters().Length > 0) continue;
-                try
-                {
-                    var value = prop.GetValue(comp, null);
-                    compInfo[prop.Name] = value;
-                }
-                catch { }
+                MissileModPlugin.LogError("Failed to extract MasterPrefab: " + ex);
             }
-
-            componentData.Add(compInfo);
         }
-
-        result["components"] = componentData;
-
-        return JsonConvert.SerializeObject(result, Formatting.None,
-            new JsonSerializerSettings
-            {
-                ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
-                NullValueHandling = NullValueHandling.Ignore
-            });
     }
 }
-
 
 [HarmonyPatch(typeof(Missile))]
 public class MissilePatches
 {
     private static HashSet<Missile> launchedMissiles = new HashSet<Missile>();
-    private static MissileLauncher launcher;
-
-    private static GameObject[] cachedMissilePrefabs;
 
     [HarmonyPostfix]
     [HarmonyPatch("FixedUpdate")]
@@ -306,11 +259,6 @@ public class MissilePatches
                 Quaternion rot = __instance.transform.rotation;
                 string coords = FormatPositionAndRotation(pos, rot);
                 string scene = SceneManager.GetActiveScene().name;
-
-                if (launcher == null)
-                {
-                    launcher = UnityEngine.Object.FindObjectOfType<MissileLauncher>();
-                }
 
                 if (!launchedMissiles.Contains(__instance))
                 {
@@ -331,12 +279,6 @@ public class MissilePatches
 
                     string msgLaunch = $"launch_missile;{playerId};{scene};{coords};{skin}";
                     MissileModPlugin.SendUdpMessage(msgLaunch);
-
-                    string jsonPrefab = MissileInspector.SerializeMissileToJson(__instance.gameObject);
-
-                    string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(jsonPrefab));
-
-                    MissileModPlugin.SendUdpMessage($"missile_prefab_data;{playerId};{scene};{encoded}");
                 }
                 else
                 {
@@ -383,46 +325,5 @@ public class MissilePatches
     private static string FormatPositionAndRotation(Vector3 pos, Quaternion rot)
     {
         return $"{pos.x},,{pos.y},,{pos.z},,{rot.x},,{rot.y},,{rot.z},,{rot.w}";
-    }
-}
-
-[HarmonyPatch(typeof(MissileLauncher))]
-public class MissileLauncherPatches
-{
-    [HarmonyPostfix]
-    [HarmonyPatch("Awake")]
-    public static void Postfix_Awake(MissileLauncher __instance)
-    {
-        TryInitializeNetworkPrefab(__instance);
-    }
-
-    [HarmonyPostfix]
-    [HarmonyPatch("Start")]
-    public static void Postfix_Start(MissileLauncher __instance)
-    {
-        TryInitializeNetworkPrefab(__instance);
-    }
-
-    private static void TryInitializeNetworkPrefab(MissileLauncher instance)
-    {
-        if (MissileManager.MasterPrefab == null)
-        {
-            try
-            {
-                FieldInfo field = typeof(MissileLauncher).GetField("PrefabMissile", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
-                if (field != null)
-                {
-                    GameObject prefab = field.GetValue(instance) as GameObject;
-                    if (prefab != null)
-                    {
-                        MissileManager.InitializeNetworkPrefab(prefab);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MissileModPlugin.LogError("Error in MissileLauncher patch: " + ex);
-            }
-        }
     }
 }
