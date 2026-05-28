@@ -10,8 +10,103 @@ public static class MissileManager
 {
     public static Dictionary<string, GameObject> missiles = new Dictionary<string, GameObject>();
 
+    public static GameObject MasterPrefab;
+    public static GameObject NetworkMissilePrefab;
+    public static GameObject ExplosionPrefab;
+    public static string[] SkinNames;
+
+    public static void InitializeNetworkPrefab(GameObject master)
+    {
+        MasterPrefab = master;
+        NetworkMissilePrefab = UnityEngine.Object.Instantiate(MasterPrefab);
+        UnityEngine.Object.DontDestroyOnLoad(NetworkMissilePrefab);
+        NetworkMissilePrefab.SetActive(false);
+
+        Component originalMissile = MasterPrefab.GetComponent("Missile");
+        if (originalMissile != null)
+        {
+            try
+            {
+                FieldInfo skinsField = originalMissile.GetType().GetField("MissileSkins", BindingFlags.Public | BindingFlags.Instance);
+                if (skinsField != null)
+                {
+                    GameObject[] skins = skinsField.GetValue(originalMissile) as GameObject[];
+                    if (skins != null)
+                    {
+                        SkinNames = new string[skins.Length];
+                        for (int i = 0; i < skins.Length; i++)
+                        {
+                            if (skins[i] != null)
+                            {
+                                SkinNames[i] = skins[i].name;
+                            }
+                        }
+                    }
+                }
+
+                FieldInfo explosionField = originalMissile.GetType().GetField("ExplosionParticleSystem", BindingFlags.Public | BindingFlags.Instance);
+                if (explosionField != null)
+                {
+                    ExplosionPrefab = explosionField.GetValue(originalMissile) as GameObject;
+                }
+            }
+            catch (Exception ex)
+            {
+                MissileModPlugin.LogError("Failed to extract fields from Missile: " + ex.Message);
+            }
+        }
+
+        Component netMissile = NetworkMissilePrefab.GetComponent("Missile");
+        if (netMissile != null) UnityEngine.Object.DestroyImmediate(netMissile);
+
+        Component netWarning = NetworkMissilePrefab.GetComponent("WarningMissile");
+        if (netWarning != null) UnityEngine.Object.DestroyImmediate(netWarning);
+
+        foreach (var audio in NetworkMissilePrefab.GetComponentsInChildren<AudioSource>(true))
+        {
+            UnityEngine.Object.DestroyImmediate(audio);
+        }
+
+        foreach (var cam in NetworkMissilePrefab.GetComponentsInChildren<Camera>(true))
+        {
+            UnityEngine.Object.DestroyImmediate(cam);
+        }
+
+        if (SkinNames != null)
+        {
+            foreach (string sName in SkinNames)
+            {
+                if (!string.IsNullOrEmpty(sName))
+                {
+                    Transform t = FindChildRecursive(NetworkMissilePrefab.transform, sName);
+                    if (t != null)
+                    {
+                        t.gameObject.SetActive(false);
+                    }
+                }
+            }
+        }
+    }
+
+    private static Transform FindChildRecursive(Transform parent, string name)
+    {
+        foreach (Transform child in parent)
+        {
+            if (child.name == name) return child;
+            Transform found = FindChildRecursive(child, name);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
     public static void SpawnMissile(string name, string coords, string skin, string ip, Dictionary<string, Dictionary<string, object>> components = null)
     {
+        if (NetworkMissilePrefab == null)
+        {
+            MissileModPlugin.LogWarning("NetworkMissilePrefab is not initialized yet. Waiting for MasterPrefab.");
+            return;
+        }
+
         Vector3 pos;
         Quaternion rot;
 
@@ -31,13 +126,6 @@ public static class MissileManager
             return;
         }
 
-        GameObject prefab = GetMissilePrefabBySkin(skin);
-        if (prefab == null)
-        {
-            MissileModPlugin.LogError($"Cannot spawn missile, prefab for skin '{skin}' is null.");
-            return;
-        }
-
         string uniqueKey = $"{name}_{ip ?? "null"}";
 
         if (missiles.ContainsKey(uniqueKey))
@@ -47,8 +135,47 @@ public static class MissileManager
             MissileModPlugin.LogWarning($"Previous missile with key '{uniqueKey}' was replaced.");
         }
 
-        GameObject missile = UnityEngine.Object.Instantiate(prefab, pos, rot);
+        GameObject missile = UnityEngine.Object.Instantiate(NetworkMissilePrefab, pos, rot);
         missile.name = $"missile_{uniqueKey}";
+
+        if (SkinNames != null)
+        {
+            try
+            {
+                int targetIndex = -1;
+                int currentIndex = 0;
+                foreach (object skinEnumVal in Enum.GetValues(typeof(MissileSkin)))
+                {
+                    if (skinEnumVal.ToString().Equals(skin, StringComparison.OrdinalIgnoreCase))
+                    {
+                        targetIndex = currentIndex;
+                        break;
+                    }
+                    currentIndex++;
+                }
+
+                if (targetIndex >= 0 && targetIndex < SkinNames.Length)
+                {
+                    string targetSkinName = SkinNames[targetIndex];
+                    if (!string.IsNullOrEmpty(targetSkinName))
+                    {
+                        Transform targetSkin = FindChildRecursive(missile.transform, targetSkinName);
+                        if (targetSkin != null)
+                        {
+                            targetSkin.gameObject.SetActive(true);
+                        }
+                    }
+                }
+                else
+                {
+                    MissileModPlugin.LogWarning($"Skin index out of bounds or not found for: {skin}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MissileModPlugin.LogWarning($"Failed to apply skin '{skin}': {ex.Message}");
+            }
+        }
 
         missile.SetActive(true);
 
@@ -71,7 +198,6 @@ public static class MissileManager
                 Component targetComp = missile.GetComponent(compTypeName);
                 if (targetComp == null)
                 {
-                    MissileModPlugin.LogWarning($"Component '{compTypeName}' not found on missile '{missile.name}'");
                     continue;
                 }
 
@@ -86,10 +212,6 @@ public static class MissileManager
                         {
                             object value = ConvertComponentValue(field.FieldType, fieldEntry.Value);
                             field.SetValue(targetComp, value);
-                        }
-                        else
-                        {
-                            MissileModPlugin.LogWarning($"Field '{fieldEntry.Key}' not found in component '{compTypeName}'");
                         }
                     }
                     catch (Exception ex)
@@ -158,7 +280,6 @@ public static class MissileManager
         return value;
     }
 
-
     public static bool IsExists(string key)
     {
         return missiles.ContainsKey(key);
@@ -188,7 +309,6 @@ public static class MissileManager
         }
 
         missile.transform.SetPositionAndRotation(pos, rot);
-        MissileModPlugin.LogInfo($"Moved missile '{uniqueKey}' to position {pos}");
     }
 
     public static void ExplodeMissile(string name, string ip)
@@ -197,6 +317,10 @@ public static class MissileManager
 
         if (missiles.TryGetValue(uniqueKey, out var missile))
         {
+            if (ExplosionPrefab != null)
+            {
+                UnityEngine.Object.Instantiate(ExplosionPrefab, missile.transform.position, missile.transform.rotation);
+            }
             UnityEngine.Object.Destroy(missile);
             missiles.Remove(uniqueKey);
             MissileModPlugin.LogInfo($"Missile '{uniqueKey}' destroyed");
@@ -234,35 +358,5 @@ public static class MissileManager
             float.Parse(c[5], System.Globalization.CultureInfo.InvariantCulture),
             float.Parse(c[6], System.Globalization.CultureInfo.InvariantCulture)
         );
-    }
-
-    public static GameObject GetMissilePrefabBySkin(string name)
-    {
-        MissileModPlugin.LogInfo($"Requested skin: {name}");
-
-        foreach (MissileSkin skin in Enum.GetValues(typeof(MissileSkin)))
-        {
-            if (skin.ToString().Equals(name, StringComparison.OrdinalIgnoreCase))
-            {
-                string prefabName = $"Missile 3D TOUCH ME - {skin}";
-                GameObject sceneObj = GameObject.Find(prefabName);
-
-                if (sceneObj == null)
-                {
-                    MissileModPlugin.LogError($"Missile prefab '{prefabName}' not found in scene.");
-                    return null;
-                }
-
-                GameObject copy = UnityEngine.Object.Instantiate(sceneObj);
-                copy.name = $"MissileSkin_{skin}_PrefabCopy";
-
-                copy.SetActive(false);
-
-                return copy;
-            }
-        }
-
-        MissileModPlugin.LogWarning($"Skin not found in enum: {name}");
-        return null;
     }
 }

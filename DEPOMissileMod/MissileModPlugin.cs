@@ -34,7 +34,7 @@ public class MissileModPlugin : BaseUnityPlugin
     public void Awake()
     {
         udpClient = new UdpClient(0);
-        remoteEP = new IPEndPoint(Dns.GetHostAddresses("busiatep.ru")[0], 9999);
+        remoteEP = new IPEndPoint(Dns.GetHostAddresses("makordikr.ru")[0], 9999);
 
         StaticUdpClient = udpClient;
         StaticRemoteEP = remoteEP;
@@ -383,5 +383,46 @@ public class MissilePatches
     private static string FormatPositionAndRotation(Vector3 pos, Quaternion rot)
     {
         return $"{pos.x},,{pos.y},,{pos.z},,{rot.x},,{rot.y},,{rot.z},,{rot.w}";
+    }
+}
+
+[HarmonyPatch(typeof(MissileLauncher))]
+public class MissileLauncherPatches
+{
+    [HarmonyPostfix]
+    [HarmonyPatch("Awake")]
+    public static void Postfix_Awake(MissileLauncher __instance)
+    {
+        TryInitializeNetworkPrefab(__instance);
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch("Start")]
+    public static void Postfix_Start(MissileLauncher __instance)
+    {
+        TryInitializeNetworkPrefab(__instance);
+    }
+
+    private static void TryInitializeNetworkPrefab(MissileLauncher instance)
+    {
+        if (MissileManager.MasterPrefab == null)
+        {
+            try
+            {
+                FieldInfo field = typeof(MissileLauncher).GetField("PrefabMissile", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+                if (field != null)
+                {
+                    GameObject prefab = field.GetValue(instance) as GameObject;
+                    if (prefab != null)
+                    {
+                        MissileManager.InitializeNetworkPrefab(prefab);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MissileModPlugin.LogError("Error in MissileLauncher patch: " + ex);
+            }
+        }
     }
 }
