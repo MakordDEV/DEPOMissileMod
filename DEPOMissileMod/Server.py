@@ -97,6 +97,10 @@ def main():
             if command == "imalive":
                 with data_lock:
                     client_last_alive[addr] = time.time()
+                    if len(parts) >= 2:
+                        steam_id = parts[1].strip()
+                        addr_to_steam[addr] = steam_id
+                        client_nicknames[addr] = steam_id
                 continue
 
             if command == "hello" and len(parts) >= 2:

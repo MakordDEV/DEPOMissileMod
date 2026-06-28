@@ -170,8 +170,11 @@ public class MissileModPlugin : BaseUnityPlugin
     {
         while (true)
         {
-            SendUdpMessage("imalive");
-            yield return new WaitForSeconds(25f);
+            if (!string.IsNullOrEmpty(steam_id))
+            {
+                SendUdpMessage("imalive;" + steam_id);
+            }
+            yield return new WaitForSeconds(5f);
         }
     }
 
