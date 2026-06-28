@@ -31,7 +31,7 @@ public class MissileModPlugin : BaseUnityPlugin
     public void Awake()
     {
         udpClient = new UdpClient(0);
-        remoteEP = new IPEndPoint(Dns.GetHostAddresses("makordikr.ru")[0], 9999);
+        remoteEP = new IPEndPoint(Dns.GetHostAddresses("vps.makordikr.ru")[0], 9999);
 
         StaticUdpClient = udpClient;
         StaticRemoteEP = remoteEP;
