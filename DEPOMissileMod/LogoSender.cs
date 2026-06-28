@@ -83,6 +83,8 @@ public class LogoSender : MonoBehaviour
 
         byte[] jpgData = tex2D.EncodeToJPG(90);
 
+        UnityEngine.Object.Destroy(tex2D);
+
         if (jpgData.Length > 60000)
         {
             MissileModPlugin.LogWarning($"DP Logo too large for UDP: {jpgData.Length} bytes");

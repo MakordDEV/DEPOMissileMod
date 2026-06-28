@@ -1,11 +1,9 @@
-﻿# Debug messages of server-side part are in Russian. Use translator to understand debug messages in your own language or figure them out from code’s functionality.
-# Script uses UDP and HTTPS. If you want to run your own UDP & HTTPS server, do it on a VPS/VDS and buy certificates or get free ones from Let’s Encrypt. If you don’t want to, you can simply run an HTTP & UDP server :P
-
-import base64
+﻿import base64
 import json
 import socket
 import time
 import threading
+import re
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -22,23 +20,30 @@ client_last_alive = {}   # ip -> timestamp
 client_last_scene = {}   # ip -> last get_cord scene
 client_nicknames = {}    # ip -> nickname
 
+data_lock = threading.Lock()
+addr_to_steam = {}
+
 TIMEOUT_SECONDS = 30
 
 
-def remove_client(ip: str):
-    global udp_clients, photos, missiles, client_last_alive, client_last_scene, client_nicknames
+def remove_client(addr):
+    global udp_clients, photos, missiles, client_last_alive, client_last_scene, client_nicknames, addr_to_steam
 
-    udp_clients = {client for client in udp_clients if client[0] != ip}
-    photos.pop(ip, None)
-    client_last_alive.pop(ip, None)
-    client_last_scene.pop(ip, None)
-    client_nicknames.pop(ip, None)
+    with data_lock:
+        udp_clients.discard(addr)
+        photos.pop(addr, None)
+        client_last_alive.pop(addr, None)
+        client_last_scene.pop(addr, None)
+        client_nicknames.pop(addr, None)
 
-    for scene in missiles:
-        if ip in missiles[scene]:
-            del missiles[scene][ip]
+        steam_id = addr_to_steam.get(addr)
+        if steam_id:
+            for scene in missiles:
+                if steam_id in missiles[scene]:
+                    del missiles[scene][steam_id]
+            addr_to_steam.pop(addr, None)
 
-    print(f"[Удалён] {ip} за неактивность или по 'bye'")
+    print(f"[Удалён] {addr} за неактивность или по 'bye'")
 
 
 def imalive_watcher():
@@ -46,12 +51,13 @@ def imalive_watcher():
         now = time.time()
         to_remove = []
 
-        for ip, last_alive in client_last_alive.items():
-            if now - last_alive > TIMEOUT_SECONDS:
-                to_remove.append(ip)
+        with data_lock:
+            for addr, last_alive in list(client_last_alive.items()):
+                if now - last_alive > TIMEOUT_SECONDS:
+                    to_remove.append(addr)
 
-        for ip in to_remove:
-            remove_client(ip)
+        for addr in to_remove:
+            remove_client(addr)
 
         time.sleep(TIMEOUT_SECONDS)
 
@@ -66,12 +72,14 @@ def main():
     while True:
         try:
             data, addr = udp_sock.recvfrom(BUF_SIZE)
-            ip, port = addr
-            udp_clients.add(addr)
+            
+            with data_lock:
+                udp_clients.add(addr)
 
             if data.startswith(b"\xFF\xD8"):
-                photos[ip] = data
-                print(f"JPEG-фотография сохранена от {ip}")
+                with data_lock:
+                    photos[addr] = data
+                print(f"JPEG-фотография сохранена от {addr}")
                 continue
 
             text = data.decode('utf-8', errors='ignore').strip()
@@ -83,28 +91,37 @@ def main():
             command = parts[0]
 
             if text == "bye":
-                remove_client(ip)
+                remove_client(addr)
                 continue
 
-            if text == "imalive":
-                client_last_alive[ip] = time.time()
+            if command == "imalive":
+                with data_lock:
+                    client_last_alive[addr] = time.time()
                 continue
 
             if command == "hello" and len(parts) >= 2:
-                nickname = parts[1].strip()
-                client_nicknames[ip] = nickname
-                print(f"[Приветствие] {ip} → '{nickname}'")
+                steam_id = parts[1].strip()
+                with data_lock:
+                    addr_to_steam[addr] = steam_id
+                    client_nicknames[addr] = steam_id
+                print(f"[Приветствие] {addr} → '{steam_id}'")
                 continue
 
-            if command == "launch_missile" and len(parts) >= 5:
-                name, scene, coords, skin = parts[1:5]
-                if scene not in missiles:
-                    missiles[scene] = {}
-                missiles[scene][ip] = {"name": name, "coords": coords, "skin": skin}
-                print(f"[launch_missile] {ip} → '{name}' → {scene} ; {coords} ; {skin}")
+            with data_lock:
+                steam_id = addr_to_steam.get(addr, f"{addr[0]}:{addr[1]}")
 
-            elif command == "missile_prefab_data" and len(parts) >= 3:
+            if command == "launch_missile" and len(parts) >= 5:
+                p_steam_id, scene, coords, skin = parts[1:5]
+                with data_lock:
+                    if scene not in missiles:
+                        missiles[scene] = {}
+                    missiles[scene][p_steam_id] = {"name": p_steam_id, "coords": coords, "skin": skin}
+                print(f"[launch_missile] {addr} → '{p_steam_id}' → {scene} ; {coords} ; {skin}")
+
+            elif command == "missile_prefab_data" and len(parts) >= 4:
                 name, scene, b64 = parts[1:4]
+                name = re.sub(r'[^a-zA-Z0-9_\-]', '', name)
+                scene = re.sub(r'[^a-zA-Z0-9_\-]', '', scene)
                 try:
                     json_data = base64.b64decode(b64).decode("utf-8")
                     prefab_info = json.loads(json_data)
@@ -116,59 +133,67 @@ def main():
 
             elif command == "move_missile" and len(parts) >= 3:
                 scene, coords = parts[1:3]
-                if scene in missiles and ip in missiles[scene]:
-                    missiles[scene][ip]["coords"] = coords
-                    nickname = client_nicknames.get(ip, "<неизвестно>")
-                    print(f"[move_missile] {ip} → '{nickname}' → {coords} ; {scene}")
+                with data_lock:
+                    if scene in missiles and steam_id in missiles[scene]:
+                        missiles[scene][steam_id]["coords"] = coords
+                nickname = client_nicknames.get(addr, "<неизвестно>")
+                print(f"[move_missile] {addr} → '{nickname}' → {coords} ; {scene}")
 
             elif command == "explode_missile" and len(parts) >= 3:
                 scene, coords = parts[1:3]
-                if scene in missiles and ip in missiles[scene]:
-                    del missiles[scene][ip]
-                    nickname = client_nicknames.get(ip, "<неизвестно>")
-                    print(f"[explode_missile] {ip} → '{nickname}' → {coords} ; {scene}")
+                with data_lock:
+                    if scene in missiles and steam_id in missiles[scene]:
+                        del missiles[scene][steam_id]
+                nickname = client_nicknames.get(addr, "<неизвестно>")
+                print(f"[explode_missile] {addr} → '{nickname}' → {coords} ; {scene}")
 
             elif command == "get_cord" and len(parts) >= 2:
                 scene = parts[1].strip()
 
-                last_scene = client_last_scene.get(ip)
-                if last_scene != scene:
-                    client_last_scene[ip] = scene
-                    nickname = client_nicknames.get(ip, "<неизвестно>")
-                    print(f"[get_cord] {ip} → '{nickname}' → сцена: {scene}")
+                with data_lock:
+                    last_scene = client_last_scene.get(addr)
+                    if last_scene != scene:
+                        client_last_scene[addr] = scene
+                        nickname = client_nicknames.get(addr, "<неизвестно>")
+                        print(f"[get_cord] {addr} → '{nickname}' → сцена: {scene}")
 
-                if scene in missiles:
-                    for missile_ip, data_dict in missiles[scene].items():
-                        name = data_dict["name"]
-                        coords = data_dict["coords"]
-                        skin = data_dict["skin"]
-                        msg = f"missile_info;{name};{scene};{coords};{skin};{missile_ip}"
+                    if scene in missiles:
+                        missile_list = []
+                        for m_steam_id, data_dict in missiles[scene].items():
+                            missile_list.append({
+                                "name": data_dict["name"],
+                                "scene": scene,
+                                "coords": data_dict["coords"],
+                                "skin": data_dict["skin"],
+                                "ip": m_steam_id
+                            })
+                        msg = "missiles_json;" + json.dumps(missile_list)
                         udp_sock.sendto(msg.encode('utf-8'), addr)
 
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"Ошибка в основном цикле UDP: {e}")
 
 @app.route("/get_cord", methods=["GET"])
 def get_cord():
     scene = request.args.get("scene")
-    ip = request.remote_addr 
 
-    if scene not in missiles:
-        return jsonify([])
+    with data_lock:
+        if scene not in missiles:
+            return jsonify([])
 
-    missile_list = []
-    for missile_ip, data_dict in missiles[scene].items():
-        missile_list.append({
-            "name": data_dict["name"],
-            "scene": scene,
-            "coords": data_dict["coords"],
-            "skin": data_dict["skin"],
-            "ip": missile_ip
-        })
+        missile_list = []
+        for m_steam_id, data_dict in missiles[scene].items():
+            missile_list.append({
+                "name": data_dict["name"],
+                "scene": scene,
+                "coords": data_dict["coords"],
+                "skin": data_dict["skin"],
+                "ip": m_steam_id
+            })
     return jsonify(missile_list)
 
 if __name__ == "__main__":
     threading.Thread(target=main).start()
-    context = ('/etc/letsencrypt/live/busiatep.ru/fullchain.pem', 
-               '/etc/letsencrypt/live/busiatep.ru/privkey.pem')
+    context = ('/etc/letsencrypt/live/makordikr.ru/fullchain.pem', 
+               '/etc/letsencrypt/live/makordikr.ru/privkey.pem')
     app.run(host='0.0.0.0', port=HTTPS_PORT, ssl_context=context)

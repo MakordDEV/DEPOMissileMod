@@ -6,17 +6,14 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
-using System.Threading.Tasks;
 using UnityEngine;
-using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
 
-[BepInPlugin("ru.makorddev.depomissilemod", "DEPO missile mod", "1.0")]
+[BepInPlugin("ru.makorddev.depomissilemod", "DEPO missile mod", "4.2")]
 public class MissileModPlugin : BaseUnityPlugin
 {
     private UdpClient udpClient;
@@ -50,8 +47,92 @@ public class MissileModPlugin : BaseUnityPlugin
 
     public void Start()
     {
+        StartReceive();
         StartCoroutine(SayHello());
-        RunSendGetCordLoop();
+        StartCoroutine(UdpGetCordLoop());
+    }
+
+    private void StartReceive()
+    {
+        try
+        {
+            udpClient.BeginReceive(new AsyncCallback(ReceiveCallback), null);
+        }
+        catch { }
+    }
+
+    private void ReceiveCallback(IAsyncResult res)
+    {
+        try
+        {
+            IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+            byte[] data = udpClient.EndReceive(res, ref remote);
+            string msg = Encoding.UTF8.GetString(data);
+            receivedMessages.Enqueue(msg);
+            StartReceive();
+        }
+        catch { }
+    }
+
+    public void Update()
+    {
+        string scene = SceneManager.GetActiveScene().name;
+
+        while (receivedMessages.TryDequeue(out string msg))
+        {
+            try
+            {
+                string[] parts = msg.Split(new char[] { ';' }, 2);
+                if (parts.Length == 2 && parts[0] == "missiles_json")
+                {
+                    string json = parts[1];
+                    List<MissileInfo> missiles = JsonConvert.DeserializeObject<List<MissileInfo>>(json);
+                    HashSet<string> receivedKeys = new HashSet<string>();
+
+                    foreach (var missile in missiles)
+                    {
+                        if (missile.scene != scene) continue;
+
+                        string key = $"{missile.name}_{missile.ip}";
+                        receivedKeys.Add(key);
+
+                        if (MissileManager.IsExists(key))
+                        {
+                            MissileManager.MoveMissile(missile.name, missile.coords, missile.ip);
+                        }
+                        else
+                        {
+                            MissileManager.SpawnMissile(
+                                missile.name,
+                                missile.coords,
+                                missile.skin,
+                                missile.ip,
+                                missile.components
+                            );
+                        }
+                    }
+
+                    var currentKeys = new List<string>(MissileManager.missiles.Keys);
+                    foreach (var key in currentKeys)
+                    {
+                        if (!receivedKeys.Contains(key))
+                        {
+                            int underscoreIndex = key.LastIndexOf('_');
+                            if (underscoreIndex > 0)
+                            {
+                                string name = key.Substring(0, underscoreIndex);
+                                string ip = key.Substring(underscoreIndex + 1);
+                                MissileManager.ExplodeMissile(name, ip);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("UDP Parse error: " + ex.Message);
+            }
+        }
     }
 
     private void OnApplicationQuit()
@@ -94,103 +175,13 @@ public class MissileModPlugin : BaseUnityPlugin
         }
     }
 
-    private async void RunSendGetCordLoop()
+    private IEnumerator UdpGetCordLoop()
     {
-        try
+        while (true)
         {
-            while (true)
-            {
-                await SendGetCordAsync();
-                await Task.Delay(50);
-            }
-        }
-        catch (Exception ex)
-        {
-            LogError("[RunSendGetCordLoop] Exception: " + ex);
-        }
-    }
-
-    private async Task SendGetCordAsync()
-    {
-        string scene = SceneManager.GetActiveScene().name;
-        string url = $"https://busiatep.ru:9998/get_cord?scene={scene}";
-
-        try
-        {
-            using (UnityWebRequest request = UnityWebRequest.Get(url))
-            {
-                var operation = request.SendWebRequest();
-
-                while (!operation.isDone)
-                    await Task.Yield();
-
-                if (request.result != UnityWebRequest.Result.Success)
-                {
-                    LogError($"[SendGetCord] HTTP error: {request.error}");
-                    return;
-                }
-
-                string json = request.downloadHandler.text;
-
-                if (string.IsNullOrEmpty(json))
-                    return;
-
-                List<MissileInfo> missiles;
-                try
-                {
-                    missiles = JsonConvert.DeserializeObject<List<MissileInfo>>(json);
-                }
-                catch (Exception ex)
-                {
-                    LogError("[SendGetCord] JSON parse error: " + ex.Message);
-                    return;
-                }
-
-                HashSet<string> receivedKeys = new HashSet<string>();
-
-                foreach (var missile in missiles)
-                {
-                    if (missile.scene != scene)
-                        continue;
-
-                    string key = $"{missile.name}_{missile.ip}";
-                    receivedKeys.Add(key);
-
-                    if (MissileManager.IsExists(key))
-                    {
-                        MissileManager.MoveMissile(missile.name, missile.coords, missile.ip);
-                    }
-                    else
-                    {
-                        MissileManager.SpawnMissile(
-                            missile.name,
-                            missile.coords,
-                            missile.skin,
-                            missile.ip,
-                            missile.components 
-                        );
-                    }
-                }
-
-                var currentKeys = new List<string>(MissileManager.missiles.Keys);
-                foreach (var key in currentKeys)
-                {
-                    if (!receivedKeys.Contains(key))
-                    {
-                        int underscoreIndex = key.LastIndexOf('_');
-                        if (underscoreIndex > 0)
-                        {
-                            string name = key.Substring(0, underscoreIndex);
-                            string ip = key.Substring(underscoreIndex + 1);
-                            MissileManager.ExplodeMissile(name, ip);
-                        }
-                    }
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            LogError($"[SendGetCord] Exception: {e}");
+            string scene = SceneManager.GetActiveScene().name;
+            SendUdpMessage("get_cord;" + scene);
+            yield return new WaitForSeconds(0.05f);
         }
     }
 
@@ -250,6 +241,7 @@ public class MissilePatches
     [HarmonyPatch("FixedUpdate")]
     public static void Postfix_FixedUpdate(Missile __instance)
     {
+        launchedMissiles.RemoveWhere(m => m == null);
         try
         {
             var state = __instance.MyMissileState;
